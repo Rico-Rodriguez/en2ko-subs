@@ -889,13 +889,17 @@ async function aioMfCatalogs(
   mBase?: string,
 ): Promise<Record<string, unknown>[]> {
   if (!mBase) return [];
-  if (mfCatCache && Date.now() - mfCatCache.at < 3600 * 1000) {
+  // Successes cache for 1h; failures negative-cache for 10 min so a dead
+  // MediaFusion never makes the merged manifest slow — its catalogs
+  // simply join on a later refresh once it answers again.
+  const ttl = mfCatCache?.cats.length ? 3600 * 1000 : 600 * 1000;
+  if (mfCatCache && Date.now() - mfCatCache.at < ttl) {
     return mfCatCache.cats;
   }
-  const man = await aioFetchJson(`${mBase}/manifest.json`, 30000);
+  const man = await aioFetchJson(`${mBase}/manifest.json`, 60000);
   const cats =
     (man?.catalogs as Record<string, unknown>[] | undefined) || [];
-  if (cats.length) mfCatCache = { at: Date.now(), cats };
+  mfCatCache = { at: Date.now(), cats };
   return cats;
 }
 
