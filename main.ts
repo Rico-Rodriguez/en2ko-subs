@@ -892,7 +892,7 @@ async function aioMfCatalogs(
   if (mfCatCache && Date.now() - mfCatCache.at < 3600 * 1000) {
     return mfCatCache.cats;
   }
-  const man = await aioFetchJson(`${mBase}/manifest.json`, 15000);
+  const man = await aioFetchJson(`${mBase}/manifest.json`, 30000);
   const cats =
     (man?.catalogs as Record<string, unknown>[] | undefined) || [];
   if (cats.length) mfCatCache = { at: Date.now(), cats };
@@ -954,7 +954,7 @@ async function aioCatalog(
     if (mfCats.some((c) => c.id === id && c.type === type)) {
       const proxied = await aioFetchJson(
         `${cfg.m}/catalog/${type}/${id}${extraSeg ? `/${extraSeg}` : ""}.json`,
-        15000,
+        30000,
       );
       if (proxied) return proxied;
     }
@@ -966,6 +966,7 @@ async function aioMeta(
   cfg: AioCfg,
   type: string,
   id: string,
+  rawId: string = id,
 ): Promise<Record<string, unknown>> {
   if (type === "tv") {
     const tv = await aioTv();
@@ -980,7 +981,12 @@ async function aioMeta(
   }
   if (type === "other" || id.startsWith("st:")) {
     if (cfg.s) {
-      const m = await aioFetchJson(`${cfg.s}/meta/${type}/${id}.json`, 15000);
+      // rawId is forwarded still-encoded: store video ids contain literal
+      // "%2F" sequences that must reach StremThru untouched.
+      const m = await aioFetchJson(
+        `${cfg.s}/meta/${type}/${rawId}.json`,
+        15000,
+      );
       if (m) return m;
     }
     return { meta: {} };
@@ -1038,6 +1044,7 @@ async function aioStream(
   cfg: AioCfg,
   type: string,
   id: string,
+  rawId: string = id,
 ): Promise<Record<string, unknown>> {
   if (type === "tv") {
     const tv = await aioTv();
@@ -1047,7 +1054,7 @@ async function aioStream(
   if (type === "other" || id.startsWith("st:")) {
     if (cfg.s) {
       const s = await aioFetchJson(
-        `${cfg.s}/stream/${type}/${id}.json`,
+        `${cfg.s}/stream/${type}/${rawId}.json`,
         15000,
       );
       if (s) return s;
@@ -1126,11 +1133,14 @@ async function handleAio(req: Request, p: string): Promise<Response | null> {
     const resource = seg[1];
     const type = decodeURIComponent(seg[2] || "");
     let id = "";
+    let rawId = "";
     let extraSeg = "";
     if (seg.length === 4) {
-      id = decodeURIComponent((seg[3] || "").replace(/\.json$/, ""));
+      rawId = (seg[3] || "").replace(/\.json$/, "");
+      id = decodeURIComponent(rawId);
     } else if (seg.length >= 5) {
-      id = decodeURIComponent(seg[3] || "");
+      rawId = seg[3] || "";
+      id = decodeURIComponent(rawId);
       extraSeg = decodeURIComponent(
         (seg[seg.length - 1] || "").replace(/\.json$/, ""),
       );
@@ -1140,10 +1150,10 @@ async function handleAio(req: Request, p: string): Promise<Response | null> {
       return jsonResponse(200, await aioCatalog(cfg, type, id, extraSeg));
     }
     if (resource === "meta") {
-      return jsonResponse(200, await aioMeta(cfg, type, id));
+      return jsonResponse(200, await aioMeta(cfg, type, id, rawId));
     }
     if (resource === "stream") {
-      return jsonResponse(200, await aioStream(cfg, type, id));
+      return jsonResponse(200, await aioStream(cfg, type, id, rawId));
     }
     if (resource === "subtitles") {
       return jsonResponse(200, await aioSubtitles(req, type, id));
