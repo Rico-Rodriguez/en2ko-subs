@@ -591,6 +591,580 @@ async function resolveHash(type: string, id: string): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
+// AIO — "yeonpil All-in-One" aggregator addon (added 2026-10-22).
+//
+// One install that replaces the user's whole addon stack:
+//   Torrentio (streams) + MediaFusion (streams + watchlist catalogs)
+//   + TorBox KR (the bridge logic, live: Korean episodes on their real
+//   IMDb episode pages + meta injection for episodes missing upstream)
+//   + StremThru Store (TorBox Library catalog + playback for its items)
+//   + Live TV — US & Korea (iptv-org country playlists, parsed live)
+//   + EN→KO subtitles (the resolveHash pipeline above).
+//
+// Routes: /aio/<cfg>/manifest.json
+//         /aio/<cfg>/{catalog,meta,stream,subtitles}/<type>/<id>[/<extra>].json
+// <cfg> = base64url(JSON {t: torrentioBase, m: mediafusionBase,
+//         s: stremthruBase}) — bases without a trailing /manifest.json.
+// Every upstream leg degrades independently: a dead or slow upstream
+// never takes the others down with it.
+// ---------------------------------------------------------------------------
+
+interface AioCfg {
+  t?: string;
+  m?: string;
+  s?: string;
+}
+
+interface AioShow {
+  name: string;
+  query: string;
+  exclude?: string[];
+}
+
+const AIO_SHOWS: AioShow[] = [{"name": "Running Man", "query": "런닝맨"}, {"exclude": ["사랑은 계속된다", "지지고 볶는"], "name": "I Am Solo", "query": "나는 SOLO"}, {"name": "I Am Solo: Love Continues (Nasol Sagye)", "query": "사랑은 계속된다"}, {"name": "I Am Solo spin-off: Jijigo Bokneun Yeohaeng", "query": "지지고 볶는 여행"}, {"name": "Home Alone (I Live Alone)", "query": "나 혼자 산다"}, {"name": "Hangout with Yoo", "query": "놀면 뭐하니"}, {"name": "2 Days & 1 Night", "query": "1박 2일"}, {"name": "Knowing Bros", "query": "아는 형님"}, {"name": "The Manager (Omniscient Interfering View)", "query": "전지적 참견 시점"}, {"name": "My Little Old Boy", "query": "미운 우리 새끼"}, {"name": "Immortal Songs", "query": "불후의 명곡"}, {"name": "King of Mask Singer", "query": "복면가왕"}, {"name": "Heart Signal", "query": "하트시그널"}, {"name": "Heart Pairing", "query": "하트페어링"}, {"name": "Couple Palace", "query": "커플팰리스"}, {"name": "EXchange (Transit Love)", "query": "환승연애"}, {"name": "Love After Divorce (Dol Singles)", "query": "돌싱글즈"}, {"name": "Possessed Love", "query": "신들린 연애"}, {"name": "My Sibling's Romance", "query": "연애남매"}, {"name": "Better Late Than Single", "query": "모태솔로지만 연애는 하고 싶어"}, {"name": "Single's Inferno", "query": "솔로지옥"}];
+const AIO_IMDB: Record<string, string> = {"Running Man": "tt2185037", "I Am Solo": "tt31956936", "I Am Solo: Love Continues (Nasol Sagye)": "tt32270896", "Home Alone (I Live Alone)": "tt12724870", "Hangout with Yoo": "tt15334046", "Knowing Bros": "tt5247622", "My Little Old Boy": "tt33336849", "Heart Signal": "tt16444020", "Heart Pairing": "tt36595271", "Couple Palace": "tt32270478", "Love After Divorce (Dol Singles)": "tt28665617", "My Sibling's Romance": "tt31867638", "Single's Inferno": "tt16283666", "The Manager (Omniscient Interfering View)": "tt15340934", "Better Late Than Single": "tt35668156", "EXchange (Transit Love)": "tt27889213", "Possessed Love": "tt36314699"};
+const AIO_TT2SHOW: Record<string, string> = Object.fromEntries(
+  Object.entries(AIO_IMDB).map(([k, v]) => [v, k]),
+);
+
+function aioDecodeCfg(seg: string): AioCfg | null {
+  try {
+    const b64 = seg.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b64.length % 4 ? "=".repeat(4 - (b64.length % 4)) : "";
+    const obj = JSON.parse(atob(b64 + pad));
+    const clean = (v: unknown) =>
+      typeof v === "string" ? v.replace(/\/+$/, "") : undefined;
+    const cfg: AioCfg = { t: clean(obj.t), m: clean(obj.m), s: clean(obj.s) };
+    return cfg.t || cfg.m || cfg.s ? cfg : null;
+  } catch {
+    return null;
+  }
+}
+
+async function aioFetchJson(
+  url: string,
+  timeoutMs = 9000,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": UA, "Accept": "application/json" },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) {
+      await res.text().catch(() => "");
+      return null;
+    }
+    return (await res.json()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+// --- Korean matching: a port of the watcher's title rules -----------------
+
+function aioNorm(s: string): string {
+  return s.replace(/[\s.\-_·,]+/g, "").toLowerCase();
+}
+
+function aioTitleMatches(title: string, show: AioShow): boolean {
+  const nt = aioNorm(title);
+  if (!nt.includes(aioNorm(show.query))) return false;
+  for (const ex of show.exclude || []) {
+    if (nt.includes(aioNorm(ex))) return false;
+  }
+  return true;
+}
+
+function aioEpisodeNum(title: string): number | null {
+  const m = title.match(/[.\s]E(\d{2,4})[.\s]/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// --- StremThru Store (TorBox library by raw filename) ----------------------
+
+interface StoreItem {
+  id: string;
+  name: string;
+}
+
+const storeCache = new Map<string, { at: number; items: StoreItem[] }>();
+
+async function aioStoreItems(sBase: string): Promise<StoreItem[]> {
+  const c = storeCache.get(sBase);
+  if (c && Date.now() - c.at < 10 * 60 * 1000) return c.items;
+  const items: StoreItem[] = [];
+  for (let skip = 0; skip <= 400; skip += 100) {
+    const page = await aioFetchJson(
+      `${sBase}/catalog/other/st:store:tb${skip ? `/skip=${skip}` : ""}.json`,
+      15000,
+    );
+    const metas = (page?.metas as Record<string, unknown>[] | undefined) || [];
+    for (const mt of metas) {
+      if (mt?.id && mt?.name) {
+        items.push({ id: String(mt.id), name: String(mt.name) });
+      }
+    }
+    if (metas.length < 100) break;
+  }
+  if (items.length) storeCache.set(sBase, { at: Date.now(), items });
+  return items;
+}
+
+interface KrEp {
+  itemId: string;
+  tid: string;
+  name: string;
+}
+
+/** Map of `${tt}:${episode}` -> the TorBox item holding that episode. */
+async function aioKrInventory(sBase: string): Promise<Map<string, KrEp>> {
+  const out = new Map<string, KrEp>();
+  const items = await aioStoreItems(sBase);
+  for (const it of items) {
+    for (const show of AIO_SHOWS) {
+      if (!aioTitleMatches(it.name, show)) continue;
+      const ep = aioEpisodeNum(it.name);
+      const tt = AIO_IMDB[show.name];
+      if (ep && tt) {
+        out.set(`${tt}:${ep}`, {
+          itemId: it.id,
+          tid: it.id.split(":").pop() || it.id,
+          name: it.name,
+        });
+      }
+      break;
+    }
+  }
+  return out;
+}
+
+/** Playable URL for a store item, via the store's own meta->stream chain. */
+async function aioStoreUrl(sBase: string, item: KrEp): Promise<string | null> {
+  const cached = await rawGet(["aio-store-url", item.tid]);
+  if (typeof cached === "string" && cached) return cached;
+  const meta = await aioFetchJson(
+    `${sBase}/meta/other/${item.itemId}.json`,
+    15000,
+  );
+  const videos =
+    ((meta?.meta as Record<string, unknown> | undefined)?.videos as
+      | Record<string, unknown>[]
+      | undefined) || [];
+  const vid = videos[0]?.id;
+  if (!vid) return null;
+  const s = await aioFetchJson(`${sBase}/stream/other/${vid}.json`, 15000);
+  const streams = (s?.streams as Record<string, unknown>[] | undefined) || [];
+  const url = streams[0]?.url;
+  if (typeof url !== "string" || !url) return null;
+  await rawSet(["aio-store-url", item.tid], url);
+  return url;
+}
+
+// --- Live TV (iptv-org US + Korea playlists, parsed live) ------------------
+
+interface TvChan {
+  id: string;
+  name: string;
+  logo: string;
+  category: string;
+  country: string;
+  url: string;
+  referer: string;
+  agent: string;
+}
+
+let tvCache: {
+  at: number;
+  byId: Map<string, TvChan>;
+  byCountry: Map<string, TvChan[]>;
+} | null = null;
+
+function aioSlug(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") ||
+    "channel";
+}
+
+function aioParseM3u(text: string, country: string, out: TvChan[]): void {
+  let pending: Partial<TvChan> | null = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("#EXTINF")) {
+      const attrs: Record<string, string> = {};
+      for (const m of line.matchAll(/([\w-]+)="([^"]*)"/g)) attrs[m[1]] = m[2];
+      const name = line.includes(",")
+        ? line.slice(line.lastIndexOf(",") + 1).trim()
+        : "Channel";
+      let group = (attrs["group-title"] || "").split(";")[0].trim();
+      if (!group || group === "Undefined") group = "General";
+      pending = {
+        name,
+        logo: attrs["tvg-logo"] || "",
+        category: group,
+        country,
+        referer: "",
+        agent: "",
+      };
+    } else if (line.startsWith("#EXTVLCOPT:") && pending) {
+      const kv = line.slice("#EXTVLCOPT:".length);
+      const eq = kv.indexOf("=");
+      if (eq > 0) {
+        const k = kv.slice(0, eq).trim().toLowerCase();
+        const v = kv.slice(eq + 1).trim();
+        if (k === "http-referrer") pending.referer = v;
+        if (k === "http-user-agent") pending.agent = v;
+      }
+    } else if (line && !line.startsWith("#") && pending) {
+      pending.url = line;
+      out.push(pending as TvChan);
+      pending = null;
+    }
+  }
+}
+
+async function aioTv(): Promise<NonNullable<typeof tvCache>> {
+  if (tvCache && Date.now() - tvCache.at < 6 * 3600 * 1000) return tvCache;
+  const chans: TvChan[] = [];
+  const sources: [string, string][] = [
+    ["USA", "https://iptv-org.github.io/iptv/countries/us.m3u"],
+    ["Korea", "https://iptv-org.github.io/iptv/countries/kr.m3u"],
+  ];
+  let ok = false;
+  for (const [country, url] of sources) {
+    try {
+      const res = await downloadText(url, { timeoutMs: 30000 });
+      if (res.status === 200) {
+        aioParseM3u(res.text, country, chans);
+        ok = true;
+      }
+    } catch {
+      // keep whatever we have; stale cache below covers total failure
+    }
+  }
+  if (!ok && tvCache) return tvCache;
+  const seen = new Map<string, number>();
+  const byId = new Map<string, TvChan>();
+  const byCountry = new Map<string, TvChan[]>();
+  for (const ch of chans) {
+    let cid = "ftv_" + aioSlug(ch.name);
+    const n = (seen.get(cid) || 0) + 1;
+    seen.set(cid, n);
+    if (n > 1) cid = `${cid}_${n}`;
+    ch.id = cid;
+    byId.set(cid, ch);
+    const arr = byCountry.get(ch.country) || [];
+    arr.push(ch);
+    byCountry.set(ch.country, arr);
+  }
+  tvCache = { at: Date.now(), byId, byCountry };
+  return tvCache;
+}
+
+function aioTvMeta(ch: TvChan): Record<string, unknown> {
+  const meta: Record<string, unknown> = {
+    id: ch.id,
+    type: "tv",
+    name: ch.name,
+    genres: [ch.category],
+  };
+  if (ch.logo) meta.poster = ch.logo;
+  return meta;
+}
+
+function aioTvStream(ch: TvChan): Record<string, unknown> {
+  const stream: Record<string, unknown> = { url: ch.url, title: ch.name };
+  const reqHeaders: Record<string, string> = {};
+  if (ch.referer) reqHeaders["Referer"] = ch.referer;
+  if (ch.agent) reqHeaders["User-Agent"] = ch.agent;
+  if (Object.keys(reqHeaders).length) {
+    stream.behaviorHints = { proxyHeaders: { request: reqHeaders } };
+  }
+  return stream;
+}
+
+// --- MediaFusion catalogs (watchlists), merged into our manifest ---------
+
+let mfCatCache: { at: number; cats: Record<string, unknown>[] } | null = null;
+
+async function aioMfCatalogs(
+  mBase?: string,
+): Promise<Record<string, unknown>[]> {
+  if (!mBase) return [];
+  if (mfCatCache && Date.now() - mfCatCache.at < 3600 * 1000) {
+    return mfCatCache.cats;
+  }
+  const man = await aioFetchJson(`${mBase}/manifest.json`, 15000);
+  const cats =
+    (man?.catalogs as Record<string, unknown>[] | undefined) || [];
+  if (cats.length) mfCatCache = { at: Date.now(), cats };
+  return cats;
+}
+
+// --- AIO manifest ------------------------------------------------------------
+
+async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
+  const catalogs: Record<string, unknown>[] = [
+    { type: "tv", id: "aio_usa_all", name: "USA — All" },
+    { type: "tv", id: "aio_korea_all", name: "Korea — All" },
+    { type: "other", id: "aio_torbox", name: "TorBox Library" },
+  ];
+  for (const c of await aioMfCatalogs(cfg.m)) catalogs.push(c);
+  return {
+    id: "community.yeonpil.aio",
+    version: "1.0.0",
+    name: "yeonpil All-in-One",
+    description:
+      "Torrentio + MediaFusion + TorBox KR episodes + TorBox library + Live TV (USA/Korea) + EN→KO subtitles, in one addon.",
+    resources: ["catalog", "meta", "stream", "subtitles"],
+    types: ["movie", "series", "tv", "other"],
+    idPrefixes: ["tt", "ftv_", "st:"],
+    catalogs,
+    behaviorHints: { configurable: false },
+  };
+}
+
+// --- AIO resource handlers ---------------------------------------------------
+
+async function aioCatalog(
+  cfg: AioCfg,
+  type: string,
+  id: string,
+  extraSeg: string,
+): Promise<Record<string, unknown>> {
+  if (type === "tv" && (id === "aio_usa_all" || id === "aio_korea_all")) {
+    const tv = await aioTv();
+    const chans =
+      tv.byCountry.get(id === "aio_usa_all" ? "USA" : "Korea") || [];
+    return { metas: chans.map(aioTvMeta) };
+  }
+  if (type === "other" && id === "aio_torbox" && cfg.s) {
+    const items = await aioStoreItems(cfg.s);
+    const sm = extraSeg.match(/skip=(\d+)/);
+    const skip = sm ? Number(sm[1]) : 0;
+    return {
+      metas: items.slice(skip, skip + 100).map((it) => ({
+        id: it.id,
+        type: "other",
+        name: it.name,
+        posterShape: "poster",
+      })),
+    };
+  }
+  if (cfg.m) {
+    const mfCats = await aioMfCatalogs(cfg.m);
+    if (mfCats.some((c) => c.id === id && c.type === type)) {
+      const proxied = await aioFetchJson(
+        `${cfg.m}/catalog/${type}/${id}${extraSeg ? `/${extraSeg}` : ""}.json`,
+        15000,
+      );
+      if (proxied) return proxied;
+    }
+  }
+  return { metas: [] };
+}
+
+async function aioMeta(
+  cfg: AioCfg,
+  type: string,
+  id: string,
+): Promise<Record<string, unknown>> {
+  if (type === "tv") {
+    const tv = await aioTv();
+    const ch = tv.byId.get(id);
+    if (!ch) return { meta: {} };
+    return {
+      meta: {
+        ...aioTvMeta(ch),
+        description: `Live channel · iptv-org (${ch.country} · ${ch.category})`,
+      },
+    };
+  }
+  if (type === "other" || id.startsWith("st:")) {
+    if (cfg.s) {
+      const m = await aioFetchJson(`${cfg.s}/meta/${type}/${id}.json`, 15000);
+      if (m) return m;
+    }
+    return { meta: {} };
+  }
+  const cm = await aioFetchJson(
+    `https://v3-cinemeta.strem.io/meta/${type}/${id}.json`,
+    12000,
+  );
+  let meta = (cm?.meta as Record<string, unknown> | undefined) || null;
+  if (!meta) return { meta: {} };
+  if (type === "series" && cfg.s && AIO_TT2SHOW[id]) {
+    try {
+      const inv = await aioKrInventory(cfg.s);
+      const videos = [
+        ...((meta.videos as Record<string, unknown>[] | undefined) || []),
+      ];
+      const have = new Set(
+        videos.map((v) => v.episode).filter((e) => typeof e === "number"),
+      );
+      let added = false;
+      for (const [key, item] of inv) {
+        const [tt, epStr] = key.split(":");
+        const ep = Number(epStr);
+        if (tt !== id || have.has(ep)) continue;
+        const dm = item.name.match(/\.(\d{2})(\d{2})(\d{2})\./);
+        const video: Record<string, unknown> = {
+          id: `${id}:1:${ep}`,
+          season: 1,
+          episode: ep,
+          title: `Episode ${ep}`,
+          overview: "",
+        };
+        if (dm) {
+          video.released = `20${dm[1]}-${dm[2]}-${dm[3]}T00:00:00.000Z`;
+        }
+        videos.push(video);
+        added = true;
+      }
+      if (added) {
+        videos.sort(
+          (a, b) =>
+            Number(a.season || 0) - Number(b.season || 0) ||
+            Number(a.episode || 0) - Number(b.episode || 0),
+        );
+        meta = { ...meta, videos };
+      }
+    } catch {
+      // Korean injection is best-effort; Cinemeta alone is still correct.
+    }
+  }
+  return { meta };
+}
+
+async function aioStream(
+  cfg: AioCfg,
+  type: string,
+  id: string,
+): Promise<Record<string, unknown>> {
+  if (type === "tv") {
+    const tv = await aioTv();
+    const ch = tv.byId.get(id);
+    return { streams: ch ? [aioTvStream(ch)] : [] };
+  }
+  if (type === "other" || id.startsWith("st:")) {
+    if (cfg.s) {
+      const s = await aioFetchJson(
+        `${cfg.s}/stream/${type}/${id}.json`,
+        15000,
+      );
+      if (s) return s;
+    }
+    return { streams: [] };
+  }
+  // IMDb ids: TorBox KR (own library) first, then Torrentio, then
+  // MediaFusion — merged, deduped, each leg independent.
+  let kr: Record<string, unknown>[] = [];
+  if (type === "series" && cfg.s) {
+    const parts = id.split(":");
+    if (parts.length === 3) {
+      try {
+        const inv = await aioKrInventory(cfg.s);
+        const item = inv.get(`${parts[0]}:${Number(parts[2])}`);
+        if (item) {
+          const u = await aioStoreUrl(cfg.s, item);
+          if (u) kr = [{ name: "⚡ TorBox KR", title: item.name, url: u }];
+        }
+      } catch {
+        // fall through to the upstream legs
+      }
+    }
+  }
+  const [tor, mf] = await Promise.all([
+    cfg.t
+      ? aioFetchJson(`${cfg.t}/stream/${type}/${id}.json`, 9000)
+      : Promise.resolve(null),
+    cfg.m
+      ? aioFetchJson(`${cfg.m}/stream/${type}/${id}.json`, 9000)
+      : Promise.resolve(null),
+  ]);
+  const merged: Record<string, unknown>[] = [
+    ...kr,
+    ...((tor?.streams as Record<string, unknown>[] | undefined) || []),
+    ...((mf?.streams as Record<string, unknown>[] | undefined) || []),
+  ];
+  const seenKeys = new Set<string>();
+  const out: Record<string, unknown>[] = [];
+  for (const s of merged) {
+    const url = typeof s?.url === "string" ? s.url : "";
+    if (url.includes("/static/exceptions/")) continue; // upstream error card
+    const key =
+      url || `${s?.infoHash || ""}:${s?.fileIdx ?? ""}:${s?.name || ""}`;
+    if (!key || seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    out.push(s);
+    if (out.length >= 120) break;
+  }
+  return { streams: out };
+}
+
+async function aioSubtitles(
+  req: Request,
+  type: string,
+  id: string,
+): Promise<Record<string, unknown>> {
+  if (!type || !id) return { subtitles: [] };
+  try {
+    const hash = await resolveHash(type, id);
+    return hash ? subsResponse(baseUrl(req), hash) : { subtitles: [] };
+  } catch {
+    return { subtitles: [] };
+  }
+}
+
+async function handleAio(req: Request, p: string): Promise<Response | null> {
+  if (!p.startsWith("/aio/")) return null;
+  const seg = p.slice("/aio/".length).split("/").filter(Boolean);
+  const cfg = aioDecodeCfg(seg[0] || "");
+  if (!cfg) return new Response("not found", { status: 404 });
+  try {
+    if (seg[1] === "manifest.json") {
+      return jsonResponse(200, await aioManifest(cfg));
+    }
+    const resource = seg[1];
+    const type = decodeURIComponent(seg[2] || "");
+    let id = "";
+    let extraSeg = "";
+    if (seg.length === 4) {
+      id = decodeURIComponent((seg[3] || "").replace(/\.json$/, ""));
+    } else if (seg.length >= 5) {
+      id = decodeURIComponent(seg[3] || "");
+      extraSeg = decodeURIComponent(
+        (seg[seg.length - 1] || "").replace(/\.json$/, ""),
+      );
+    }
+    if (!resource || !type || !id) return jsonResponse(404, {});
+    if (resource === "catalog") {
+      return jsonResponse(200, await aioCatalog(cfg, type, id, extraSeg));
+    }
+    if (resource === "meta") {
+      return jsonResponse(200, await aioMeta(cfg, type, id));
+    }
+    if (resource === "stream") {
+      return jsonResponse(200, await aioStream(cfg, type, id));
+    }
+    if (resource === "subtitles") {
+      return jsonResponse(200, await aioSubtitles(req, type, id));
+    }
+    return new Response("not found", { status: 404 });
+  } catch (err) {
+    console.error("[aio] request error:", err);
+    const empty: Record<string, unknown> =
+      seg[1] === "catalog"
+        ? { metas: [] }
+        : seg[1] === "meta"
+        ? { meta: {} }
+        : seg[1] === "subtitles"
+        ? { subtitles: [] }
+        : { streams: [] };
+    return jsonResponse(200, empty);
+  }
+}
+
+
+// ---------------------------------------------------------------------------
 // HTTP layer
 // ---------------------------------------------------------------------------
 
@@ -627,6 +1201,9 @@ export async function handler(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const p = url.pathname;
   try {
+    const aioRes = await handleAio(req, p);
+    if (aioRes) return aioRes;
+
     if (p === "/manifest.json") return jsonResponse(200, MANIFEST);
 
     if (p.startsWith("/subtitles/") && p.endsWith(".json")) {
