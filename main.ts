@@ -591,111 +591,6 @@ async function resolveHash(type: string, id: string): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP layer
-// ---------------------------------------------------------------------------
-
-function jsonResponse(code: number, obj: unknown): Response {
-  return new Response(JSON.stringify(obj), {
-    status: code,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
-      "Cache-Control": "max-age=0",
-    },
-  });
-}
-
-function baseUrl(req: Request): string {
-  const override = Deno.env.get("BASE_URL");
-  const base = override || new URL(req.url).origin;
-  return base.replace(/\/$/, "");
-}
-
-function subsResponse(base: string, hash: string) {
-  return {
-    subtitles: [
-      {
-        id: `en2ko-${hash.slice(0, 16)}`,
-        url: `${base}/s/${hash}.srt`,
-        lang: "kor",
-      },
-    ],
-  };
-}
-
-export async function handler(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-  const p = url.pathname;
-  try {
-    if (p === "/manifest.json") return jsonResponse(200, MANIFEST);
-
-    if (p.startsWith("/subtitles/") && p.endsWith(".json")) {
-      const inner = p.slice("/subtitles/".length, -".json".length);
-      const parts = inner.split("/").filter(Boolean);
-      const type = decodeURIComponent(parts[0] || "");
-      const id = decodeURIComponent(parts[1] || "");
-      // parts[2..] = extra (videoHash=..., filename=...) — not needed here.
-      if (!type || !id) return jsonResponse(200, { subtitles: [] });
-      const t0 = Date.now();
-      try {
-        const hash = await resolveHash(type, id);
-        console.log(
-          `[en2ko] /subtitles/${type}/${id} -> ${
-            hash ? "ok" : "no-english-track"
-          } in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
-        );
-        return jsonResponse(
-          200,
-          hash ? subsResponse(baseUrl(req), hash) : { subtitles: [] },
-        );
-      } catch (err) {
-        console.error(
-          `[en2ko] /subtitles/${type}/${id} FAILED: ${(err as Error).message}`,
-        );
-        return jsonResponse(200, { subtitles: [] });
-      }
-    }
-
-    const sMatch = p.match(/^\/s\/([a-f0-9]{64})\.srt$/);
-    if (sMatch) {
-      const body = await getCachedText("srt", sMatch[1]);
-      if (body === null) {
-        return new Response("not found", {
-          status: 404,
-          headers: { "Content-Type": "text/plain" },
-        });
-      }
-      return new Response(body, {
-        status: 200,
-        headers: {
-          "Content-Type": "text/plain; charset=utf-8",
-          "Access-Control-Allow-Origin": "*",
-        },
-      });
-    }
-
-    return new Response("not found", {
-      status: 404,
-      headers: { "Content-Type": "text/plain" },
-    });
-  } catch (err) {
-    console.error("[en2ko] request error:", err);
-    return jsonResponse(500, { error: String((err as Error).message || err) });
-  }
-}
-
-if (import.meta.main) {
-  // On Deno Deploy the platform manages the listener — call Deno.serve
-  // with no port there. Locally, PORT (default 8000) selects the port.
-  const portEnv = Deno.env.get("PORT");
-  if (portEnv) {
-    Deno.serve({ port: Number(portEnv) }, handler);
-  } else {
-    Deno.serve(handler);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // AIO — "yeonpil All-in-One" aggregator addon (added 2026-10-22).
 //
 // One install that replaces the user's whole addon stack:
@@ -1325,3 +1220,111 @@ async function handleAio(req: Request, p: string): Promise<Response | null> {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// HTTP layer
+// ---------------------------------------------------------------------------
+
+function jsonResponse(code: number, obj: unknown): Response {
+  return new Response(JSON.stringify(obj), {
+    status: code,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "max-age=0",
+    },
+  });
+}
+
+function baseUrl(req: Request): string {
+  const override = Deno.env.get("BASE_URL");
+  const base = override || new URL(req.url).origin;
+  return base.replace(/\/$/, "");
+}
+
+function subsResponse(base: string, hash: string) {
+  return {
+    subtitles: [
+      {
+        id: `en2ko-${hash.slice(0, 16)}`,
+        url: `${base}/s/${hash}.srt`,
+        lang: "kor",
+      },
+    ],
+  };
+}
+
+export async function handler(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const p = url.pathname;
+  try {
+    const aioRes = await handleAio(req, p);
+    if (aioRes) return aioRes;
+
+    if (p === "/manifest.json") return jsonResponse(200, MANIFEST);
+
+    if (p.startsWith("/subtitles/") && p.endsWith(".json")) {
+      const inner = p.slice("/subtitles/".length, -".json".length);
+      const parts = inner.split("/").filter(Boolean);
+      const type = decodeURIComponent(parts[0] || "");
+      const id = decodeURIComponent(parts[1] || "");
+      // parts[2..] = extra (videoHash=..., filename=...) — not needed here.
+      if (!type || !id) return jsonResponse(200, { subtitles: [] });
+      const t0 = Date.now();
+      try {
+        const hash = await resolveHash(type, id);
+        console.log(
+          `[en2ko] /subtitles/${type}/${id} -> ${
+            hash ? "ok" : "no-english-track"
+          } in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+        );
+        return jsonResponse(
+          200,
+          hash ? subsResponse(baseUrl(req), hash) : { subtitles: [] },
+        );
+      } catch (err) {
+        console.error(
+          `[en2ko] /subtitles/${type}/${id} FAILED: ${(err as Error).message}`,
+        );
+        return jsonResponse(200, { subtitles: [] });
+      }
+    }
+
+    const sMatch = p.match(/^\/s\/([a-f0-9]{64})\.srt$/);
+    if (sMatch) {
+      const body = await getCachedText("srt", sMatch[1]);
+      if (body === null) {
+        return new Response("not found", {
+          status: 404,
+          headers: { "Content-Type": "text/plain" },
+        });
+      }
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
+    return new Response("not found", {
+      status: 404,
+      headers: { "Content-Type": "text/plain" },
+    });
+  } catch (err) {
+    console.error("[en2ko] request error:", err);
+    return jsonResponse(500, { error: String((err as Error).message || err) });
+  }
+}
+
+if (import.meta.main) {
+  // On Deno Deploy the platform manages the listener — call Deno.serve
+  // with no port there. Locally, PORT (default 8000) selects the port.
+  const portEnv = Deno.env.get("PORT");
+  if (portEnv) {
+    Deno.serve({ port: Number(portEnv) }, handler);
+  } else {
+    Deno.serve(handler);
+  }
+}
