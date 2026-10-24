@@ -591,6 +591,111 @@ async function resolveHash(type: string, id: string): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
+// HTTP layer
+// ---------------------------------------------------------------------------
+
+function jsonResponse(code: number, obj: unknown): Response {
+  return new Response(JSON.stringify(obj), {
+    status: code,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "max-age=0",
+    },
+  });
+}
+
+function baseUrl(req: Request): string {
+  const override = Deno.env.get("BASE_URL");
+  const base = override || new URL(req.url).origin;
+  return base.replace(/\/$/, "");
+}
+
+function subsResponse(base: string, hash: string) {
+  return {
+    subtitles: [
+      {
+        id: `en2ko-${hash.slice(0, 16)}`,
+        url: `${base}/s/${hash}.srt`,
+        lang: "kor",
+      },
+    ],
+  };
+}
+
+export async function handler(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const p = url.pathname;
+  try {
+    if (p === "/manifest.json") return jsonResponse(200, MANIFEST);
+
+    if (p.startsWith("/subtitles/") && p.endsWith(".json")) {
+      const inner = p.slice("/subtitles/".length, -".json".length);
+      const parts = inner.split("/").filter(Boolean);
+      const type = decodeURIComponent(parts[0] || "");
+      const id = decodeURIComponent(parts[1] || "");
+      // parts[2..] = extra (videoHash=..., filename=...) — not needed here.
+      if (!type || !id) return jsonResponse(200, { subtitles: [] });
+      const t0 = Date.now();
+      try {
+        const hash = await resolveHash(type, id);
+        console.log(
+          `[en2ko] /subtitles/${type}/${id} -> ${
+            hash ? "ok" : "no-english-track"
+          } in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+        );
+        return jsonResponse(
+          200,
+          hash ? subsResponse(baseUrl(req), hash) : { subtitles: [] },
+        );
+      } catch (err) {
+        console.error(
+          `[en2ko] /subtitles/${type}/${id} FAILED: ${(err as Error).message}`,
+        );
+        return jsonResponse(200, { subtitles: [] });
+      }
+    }
+
+    const sMatch = p.match(/^\/s\/([a-f0-9]{64})\.srt$/);
+    if (sMatch) {
+      const body = await getCachedText("srt", sMatch[1]);
+      if (body === null) {
+        return new Response("not found", {
+          status: 404,
+          headers: { "Content-Type": "text/plain" },
+        });
+      }
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
+    return new Response("not found", {
+      status: 404,
+      headers: { "Content-Type": "text/plain" },
+    });
+  } catch (err) {
+    console.error("[en2ko] request error:", err);
+    return jsonResponse(500, { error: String((err as Error).message || err) });
+  }
+}
+
+if (import.meta.main) {
+  // On Deno Deploy the platform manages the listener — call Deno.serve
+  // with no port there. Locally, PORT (default 8000) selects the port.
+  const portEnv = Deno.env.get("PORT");
+  if (portEnv) {
+    Deno.serve({ port: Number(portEnv) }, handler);
+  } else {
+    Deno.serve(handler);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // AIO — "yeonpil All-in-One" aggregator addon (added 2026-10-22).
 //
 // One install that replaces the user's whole addon stack:
@@ -907,9 +1012,27 @@ async function aioMfCatalogs(
 
 async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
   const catalogs: Record<string, unknown>[] = [
-    { type: "tv", id: "aio_usa_all", name: "USA — All" },
-    { type: "tv", id: "aio_korea_all", name: "Korea — All" },
-    { type: "other", id: "aio_torbox", name: "TorBox Library" },
+    {
+      type: "tv",
+      id: "aio_usa_all",
+      name: "USA — All",
+      extra: [{ name: "search", isRequired: false }],
+    },
+    {
+      type: "tv",
+      id: "aio_korea_all",
+      name: "Korea — All",
+      extra: [{ name: "search", isRequired: false }],
+    },
+    {
+      type: "other",
+      id: "aio_torbox",
+      name: "TorBox Library",
+      extra: [
+        { name: "search", isRequired: false },
+        { name: "skip", isRequired: false },
+      ],
+    },
   ];
   for (const c of await aioMfCatalogs(cfg.m)) catalogs.push(c);
   return {
@@ -928,6 +1051,18 @@ async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
 
 // --- AIO resource handlers ---------------------------------------------------
 
+/** One extra value out of a catalog extra segment ("search=foo&skip=100"). */
+function aioExtraVal(extraSeg: string, key: string): string {
+  const m = extraSeg.match(new RegExp(`(?:^|&)${key}=([^&]*)`));
+  return m ? m[1].trim() : "";
+}
+
+/** Loose name key for search: case/space/dot/dash-insensitive, so a typed
+ *  query ("i am solo") matches raw release names ("I.Am.Solo..."). */
+function aioSearchNorm(s: string): string {
+  return s.toLowerCase().replace(/[\s._\-·]+/g, "");
+}
+
 async function aioCatalog(
   cfg: AioCfg,
   type: string,
@@ -936,12 +1071,25 @@ async function aioCatalog(
 ): Promise<Record<string, unknown>> {
   if (type === "tv" && (id === "aio_usa_all" || id === "aio_korea_all")) {
     const tv = await aioTv();
-    const chans =
+    let chans =
       tv.byCountry.get(id === "aio_usa_all" ? "USA" : "Korea") || [];
+    // Clients send search queries to every searchable catalog; without
+    // filtering, a search would dump the whole channel list as "results"
+    // (the 2026-10-23 search-pollution bug). Filter by channel name.
+    const q = aioExtraVal(extraSeg, "search");
+    if (q) {
+      const nq = aioSearchNorm(q);
+      chans = chans.filter((ch) => aioSearchNorm(ch.name).includes(nq));
+    }
     return { metas: chans.map(aioTvMeta) };
   }
   if (type === "other" && id === "aio_torbox" && cfg.s) {
-    const items = await aioStoreItems(cfg.s);
+    let items = await aioStoreItems(cfg.s);
+    const q = aioExtraVal(extraSeg, "search");
+    if (q) {
+      const nq = aioSearchNorm(q);
+      items = items.filter((it) => aioSearchNorm(it.name).includes(nq));
+    }
     const sm = extraSeg.match(/skip=(\d+)/);
     const skip = sm ? Number(sm[1]) : 0;
     return {
@@ -1177,111 +1325,3 @@ async function handleAio(req: Request, p: string): Promise<Response | null> {
   }
 }
 
-
-// ---------------------------------------------------------------------------
-// HTTP layer
-// ---------------------------------------------------------------------------
-
-function jsonResponse(code: number, obj: unknown): Response {
-  return new Response(JSON.stringify(obj), {
-    status: code,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
-      "Cache-Control": "max-age=0",
-    },
-  });
-}
-
-function baseUrl(req: Request): string {
-  const override = Deno.env.get("BASE_URL");
-  const base = override || new URL(req.url).origin;
-  return base.replace(/\/$/, "");
-}
-
-function subsResponse(base: string, hash: string) {
-  return {
-    subtitles: [
-      {
-        id: `en2ko-${hash.slice(0, 16)}`,
-        url: `${base}/s/${hash}.srt`,
-        lang: "kor",
-      },
-    ],
-  };
-}
-
-export async function handler(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-  const p = url.pathname;
-  try {
-    const aioRes = await handleAio(req, p);
-    if (aioRes) return aioRes;
-
-    if (p === "/manifest.json") return jsonResponse(200, MANIFEST);
-
-    if (p.startsWith("/subtitles/") && p.endsWith(".json")) {
-      const inner = p.slice("/subtitles/".length, -".json".length);
-      const parts = inner.split("/").filter(Boolean);
-      const type = decodeURIComponent(parts[0] || "");
-      const id = decodeURIComponent(parts[1] || "");
-      // parts[2..] = extra (videoHash=..., filename=...) — not needed here.
-      if (!type || !id) return jsonResponse(200, { subtitles: [] });
-      const t0 = Date.now();
-      try {
-        const hash = await resolveHash(type, id);
-        console.log(
-          `[en2ko] /subtitles/${type}/${id} -> ${
-            hash ? "ok" : "no-english-track"
-          } in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
-        );
-        return jsonResponse(
-          200,
-          hash ? subsResponse(baseUrl(req), hash) : { subtitles: [] },
-        );
-      } catch (err) {
-        console.error(
-          `[en2ko] /subtitles/${type}/${id} FAILED: ${(err as Error).message}`,
-        );
-        return jsonResponse(200, { subtitles: [] });
-      }
-    }
-
-    const sMatch = p.match(/^\/s\/([a-f0-9]{64})\.srt$/);
-    if (sMatch) {
-      const body = await getCachedText("srt", sMatch[1]);
-      if (body === null) {
-        return new Response("not found", {
-          status: 404,
-          headers: { "Content-Type": "text/plain" },
-        });
-      }
-      return new Response(body, {
-        status: 200,
-        headers: {
-          "Content-Type": "text/plain; charset=utf-8",
-          "Access-Control-Allow-Origin": "*",
-        },
-      });
-    }
-
-    return new Response("not found", {
-      status: 404,
-      headers: { "Content-Type": "text/plain" },
-    });
-  } catch (err) {
-    console.error("[en2ko] request error:", err);
-    return jsonResponse(500, { error: String((err as Error).message || err) });
-  }
-}
-
-if (import.meta.main) {
-  // On Deno Deploy the platform manages the listener — call Deno.serve
-  // with no port there. Locally, PORT (default 8000) selects the port.
-  const portEnv = Deno.env.get("PORT");
-  if (portEnv) {
-    Deno.serve({ port: Number(portEnv) }, handler);
-  } else {
-    Deno.serve(handler);
-  }
-}
