@@ -942,10 +942,10 @@ async function aioTv(): Promise<NonNullable<typeof tvCache>> {
   return tvCache;
 }
 
-function aioTvMeta(ch: TvChan): Record<string, unknown> {
+function aioTvMeta(ch: TvChan, type = "channel"): Record<string, unknown> {
   const meta: Record<string, unknown> = {
     id: ch.id,
-    type: "tv",
+    type,
     name: ch.name,
     genres: [ch.category],
   };
@@ -991,13 +991,13 @@ async function aioMfCatalogs(
 async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
   const catalogs: Record<string, unknown>[] = [
     {
-      type: "tv",
+      type: "channel",
       id: "aio_usa_all",
       name: "USA — All",
       extra: [{ name: "search", isRequired: false }],
     },
     {
-      type: "tv",
+      type: "channel",
       id: "aio_korea_all",
       name: "Korea — All",
       extra: [{ name: "search", isRequired: false }],
@@ -1026,7 +1026,7 @@ async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
     description:
       "Torrentio + MediaFusion + TorBox KR episodes + TorBox library + Live TV (USA/Korea) + EN→KO subtitles, in one addon.",
     resources: ["catalog", "meta", "stream", "subtitles"],
-    types: ["movie", "series", "tv", "other"],
+    types: ["movie", "series", "tv", "channel", "other"],
     idPrefixes: ["tt", "ftv_", "st:", "tbkr"],
     catalogs,
     behaviorHints: { configurable: false },
@@ -1053,7 +1053,7 @@ async function aioCatalog(
   id: string,
   extraSeg: string,
 ): Promise<Record<string, unknown>> {
-  if (type === "tv" && (id === "aio_usa_all" || id === "aio_korea_all")) {
+  if ((type === "tv" || type === "channel") && (id === "aio_usa_all" || id === "aio_korea_all")) {
     const tv = await aioTv();
     let chans =
       tv.byCountry.get(id === "aio_usa_all" ? "USA" : "Korea") || [];
@@ -1065,7 +1065,7 @@ async function aioCatalog(
       const nq = aioSearchNorm(q);
       chans = chans.filter((ch) => aioSearchNorm(ch.name).includes(nq));
     }
-    return { metas: chans.map(aioTvMeta) };
+    return { metas: chans.map((ch) => aioTvMeta(ch, type)) };
   }
   if (type === "other" && id === "aio_torbox" && cfg.s) {
     let items = await aioStoreItems(cfg.s);
@@ -1124,13 +1124,13 @@ async function aioMeta(
   id: string,
   rawId: string = id,
 ): Promise<Record<string, unknown>> {
-  if (type === "tv") {
+  if (type === "tv" || type === "channel") {
     const tv = await aioTv();
     const ch = tv.byId.get(id);
     if (!ch) return { meta: {} };
     return {
       meta: {
-        ...aioTvMeta(ch),
+        ...aioTvMeta(ch, type),
         description: ch.url.startsWith("resolver:")
           ? `Live channel · official stream (${ch.country} · ${ch.category})`
           : `Live channel · iptv-org (${ch.country} · ${ch.category})`,
@@ -1213,7 +1213,7 @@ async function aioStream(
   rawId: string = id,
   req?: Request,
 ): Promise<Record<string, unknown>> {
-  if (type === "tv") {
+  if (type === "tv" || type === "channel") {
     const tv = await aioTv();
     const ch = tv.byId.get(id);
     if (!ch) return { streams: [] };
