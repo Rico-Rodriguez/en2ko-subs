@@ -822,6 +822,10 @@ function aioParseM3u(text: string, country: string, out: TvChan[]): void {
 }
 
 /** Build the id/country indexes for a parsed channel list. */
+const AIO_EXTRA_CHANS: { name: string; category: string; url: string }[] = [
+  { name: "KBS Joy", category: "Entertainment", url: "resolver:kbsjoy" },
+  { name: "MBC Every1", category: "Entertainment", url: "resolver:mbcevery1" },
+];
 function aioTvBuild(
   chans: TvChan[],
   at: number,
@@ -839,6 +843,34 @@ function aioTvBuild(
     const arr = byCountry.get(ch.country) || [];
     arr.push(ch);
     byCountry.set(ch.country, arr);
+  }
+  // Extra channels iptv-org's playlists don't carry (both exist in its
+  // channel database but have no stream there). Appended on every build,
+  // so the KV cache never needs invalidating for them; skipped if
+  // iptv-org adds the channel itself later. Their stream URLs are
+  // resolver routes (see aioLiveResolve) that 302 to a freshly resolved
+  // official stream, so nothing expirable is stored.
+  for (const ex of AIO_EXTRA_CHANS) {
+    const slug = aioSlug(ex.name);
+    if (chans.some((c) => aioSlug(c.name) === slug)) continue;
+    let cid = "ftv_" + slug;
+    const n = (seen.get(cid) || 0) + 1;
+    seen.set(cid, n);
+    if (n > 1) cid = `${cid}_${n}`;
+    const ch: TvChan = {
+      id: cid,
+      name: ex.name,
+      logo: "",
+      category: ex.category,
+      country: "Korea",
+      url: ex.url,
+      referer: "",
+      agent: "",
+    };
+    byId.set(cid, ch);
+    const karr = byCountry.get("Korea") || [];
+    karr.push(ch);
+    byCountry.set("Korea", karr);
   }
   return { at, byId, byCountry };
 }
@@ -1073,7 +1105,9 @@ async function aioMeta(
     return {
       meta: {
         ...aioTvMeta(ch),
-        description: `Live channel · iptv-org (${ch.country} · ${ch.category})`,
+        description: ch.url.startsWith("resolver:")
+          ? `Live channel · official stream (${ch.country} · ${ch.category})`
+          : `Live channel · iptv-org (${ch.country} · ${ch.category})`,
       },
     };
   }
@@ -1143,11 +1177,19 @@ async function aioStream(
   type: string,
   id: string,
   rawId: string = id,
+  req?: Request,
 ): Promise<Record<string, unknown>> {
   if (type === "tv") {
     const tv = await aioTv();
     const ch = tv.byId.get(id);
-    return { streams: ch ? [aioTvStream(ch)] : [] };
+    if (!ch) return { streams: [] };
+    if (ch.url.startsWith("resolver:") && req) {
+      const key = ch.url.slice("resolver:".length);
+      return {
+        streams: [{ url: `${baseUrl(req)}/aio/live/${key}`, title: ch.name }],
+      };
+    }
+    return { streams: [aioTvStream(ch)] };
   }
   if (type === "other" || id.startsWith("st:")) {
     if (cfg.s) {
@@ -1251,7 +1293,7 @@ async function handleAio(req: Request, p: string): Promise<Response | null> {
       return jsonResponse(200, await aioMeta(cfg, type, id, rawId));
     }
     if (resource === "stream") {
-      return jsonResponse(200, await aioStream(cfg, type, id, rawId));
+      return jsonResponse(200, await aioStream(cfg, type, id, rawId, req));
     }
     if (resource === "subtitles") {
       return jsonResponse(200, await aioSubtitles(req, type, id));
@@ -1271,6 +1313,59 @@ async function handleAio(req: Request, p: string): Promise<Response | null> {
   }
 }
 
+/** Resolve a resolver: channel to a fresh official stream URL (302).
+ * KBS Joy: KBS's official on-air API returns a signed CloudFront URL
+ * (verified playable from a US IP). MBC Every1: MBC's official media
+ * API returns the stream URL, but geo-blocks non-Korean IPs, so this
+ * 502s outside Korea by MBC's own decision, not ours. */
+async function aioLiveResolve(key: string): Promise<Response> {
+  const fail = () =>
+    new Response("stream unavailable", {
+      status: 502,
+      headers: { "Content-Type": "text/plain" },
+    });
+  try {
+    let target: string | null = null;
+    if (key === "kbsjoy") {
+      const res = await downloadText(
+        "https://mn.kbs.co.kr/api/getNewsLiveStreamUrl?channel=kbsnjoy",
+        { timeoutMs: 15000 },
+      );
+      if (res.status === 200) {
+        const j = JSON.parse(res.text) as {
+          data?: { streamUrl?: string };
+        };
+        target = j.data?.streamUrl || null;
+      }
+    } else if (key === "mbcevery1") {
+      const res = await fetch(
+        `https://mediaapi.imbc.com/Player/OnAirPlusURLUtil?ch=2&type=PC&t=${Date.now()}`,
+        {
+          headers: {
+            Referer: "https://onair.imbc.com/",
+            "User-Agent": UA,
+          },
+          signal: AbortSignal.timeout(15000),
+        },
+      );
+      if (res.status === 200) {
+        const j = (await res.json()) as {
+          MediaInfo?: { MediaURL?: string };
+        };
+        target = j.MediaInfo?.MediaURL || null;
+      }
+    } else {
+      return new Response("not found", { status: 404 });
+    }
+    if (!target) return fail();
+    return new Response(null, {
+      status: 302,
+      headers: { Location: target, "Cache-Control": "no-store" },
+    });
+  } catch {
+    return fail();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // HTTP layer
@@ -1309,6 +1404,10 @@ export async function handler(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const p = url.pathname;
   try {
+    // Config-less live resolvers for channels iptv-org doesn't stream.
+    if (p === "/aio/live/kbsjoy") return await aioLiveResolve("kbsjoy");
+    if (p === "/aio/live/mbcevery1") return await aioLiveResolve("mbcevery1");
+
     const aioRes = await handleAio(req, p);
     if (aioRes) return aioRes;
 
