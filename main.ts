@@ -822,9 +822,9 @@ function aioParseM3u(text: string, country: string, out: TvChan[]): void {
 }
 
 /** Build the id/country indexes for a parsed channel list. */
-const AIO_EXTRA_CHANS: { name: string; category: string; url: string }[] = [
-  { name: "KBS Joy", category: "Entertainment", url: "resolver:kbsjoy" },
-  { name: "MBC Every1", category: "Entertainment", url: "resolver:mbcevery1" },
+const AIO_EXTRA_CHANS: { name: string; category: string; url: string; logo: string }[] = [
+  { name: "KBS Joy", category: "Entertainment", url: "resolver:kbsjoy", logo: "https://upload.wikimedia.org/wikipedia/commons/9/98/KBS_Joy.png" },
+  { name: "MBC Every1", category: "Entertainment", url: "resolver:mbcevery1", logo: "https://upload.wikimedia.org/wikipedia/commons/2/2f/MBC_Every1.png" },
 ];
 function aioTvBuild(
   chans: TvChan[],
@@ -860,7 +860,7 @@ function aioTvBuild(
     const ch: TvChan = {
       id: cid,
       name: ex.name,
-      logo: "",
+      logo: ex.logo || "",
       category: ex.category,
       country: "Korea",
       url: ex.url,
@@ -943,11 +943,26 @@ async function aioTv(): Promise<NonNullable<typeof tvCache>> {
 }
 
 function aioTvMeta(ch: TvChan, type = "channel"): Record<string, unknown> {
+  // Display names drop the playlist tags (" (720p)", "[Not 24/7]") — the
+  // card label is the first thing a user reads, and the tags made every
+  // channel look like a filename. The dropped info moves to description.
+  // posterShape landscape: channel logos are wide/square art, and the
+  // default portrait card center-crops them into meaningless slices.
+  const flags: string[] = [];
+  const qm = ch.name.match(/\((\d+p)\)/);
+  if (qm) flags.push(qm[1]);
+  if (ch.name.includes("[Not 24/7]")) flags.push("Not 24/7");
+  if (ch.name.includes("[Geo-blocked]")) flags.push("Geo-blocked");
+  if (ch.url.startsWith("resolver:")) {
+    flags.push("Official stream — needs a Korea IP to play");
+  }
   const meta: Record<string, unknown> = {
     id: ch.id,
     type,
-    name: ch.name,
+    name: aioStripTags(ch.name),
     genres: [ch.category],
+    posterShape: "landscape",
+    description: [ch.category, ...flags].join(" • "),
   };
   if (ch.logo) meta.poster = ch.logo;
   return meta;
