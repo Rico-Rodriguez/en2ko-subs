@@ -621,8 +621,8 @@ interface AioShow {
   exclude?: string[];
 }
 
-const AIO_SHOWS: AioShow[] = [{"name": "Running Man", "query": "런닝맨"}, {"exclude": ["사랑은 계속된다", "지지고 볶는"], "name": "I Am Solo", "query": "나는 SOLO"}, {"name": "I Am Solo: Love Continues (Nasol Sagye)", "query": "사랑은 계속된다"}, {"name": "I Am Solo spin-off: Jijigo Bokneun Yeohaeng", "query": "지지고 볶는 여행"}, {"name": "Home Alone (I Live Alone)", "query": "나 혼자 산다"}, {"name": "Hangout with Yoo", "query": "놀면 뭐하니"}, {"name": "2 Days & 1 Night", "query": "1박 2일"}, {"name": "Knowing Bros", "query": "아는 형님"}, {"name": "The Manager (Omniscient Interfering View)", "query": "전지적 참견 시점"}, {"name": "My Little Old Boy", "query": "미운 우리 새끼"}, {"name": "Immortal Songs", "query": "불후의 명곡"}, {"name": "King of Mask Singer", "query": "복면가왕"}, {"name": "Heart Signal", "query": "하트시그널"}, {"name": "Heart Pairing", "query": "하트페어링"}, {"name": "Couple Palace", "query": "커플팰리스"}, {"name": "EXchange (Transit Love)", "query": "환승연애"}, {"name": "Love After Divorce (Dol Singles)", "query": "돌싱글즈"}, {"name": "Possessed Love", "query": "신들린 연애"}, {"name": "My Sibling's Romance", "query": "연애남매"}, {"name": "Better Late Than Single", "query": "모태솔로지만 연애는 하고 싶어"}, {"name": "Single's Inferno", "query": "솔로지옥"}];
-const AIO_IMDB: Record<string, string> = {"Running Man": "tt2185037", "I Am Solo": "tt31956936", "I Am Solo: Love Continues (Nasol Sagye)": "tt32270896", "Home Alone (I Live Alone)": "tt12724870", "Hangout with Yoo": "tt15334046", "Knowing Bros": "tt5247622", "My Little Old Boy": "tt33336849", "Heart Signal": "tt16444020", "Heart Pairing": "tt36595271", "Couple Palace": "tt32270478", "Love After Divorce (Dol Singles)": "tt28665617", "My Sibling's Romance": "tt31867638", "Single's Inferno": "tt16283666", "The Manager (Omniscient Interfering View)": "tt15340934", "Better Late Than Single": "tt35668156", "EXchange (Transit Love)": "tt27889213", "Possessed Love": "tt36314699"};
+const AIO_SHOWS: AioShow[] = [{"name": "Running Man", "query": "런닝맨"}, {"exclude": ["사랑은 계속된다", "지지고 볶는"], "name": "I Am Solo", "query": "나는 SOLO"}, {"name": "I Am Solo: Love Continues (Nasol Sagye)", "query": "사랑은 계속된다"}, {"name": "I Am Solo spin-off: Jijigo Bokneun Yeohaeng", "query": "지지고 볶는 여행"}, {"name": "Home Alone (I Live Alone)", "query": "나 혼자 산다"}, {"name": "Hangout with Yoo", "query": "놀면 뭐하니"}, {"name": "2 Days & 1 Night", "query": "1박 2일"}, {"name": "Knowing Bros", "query": "아는 형님"}, {"name": "The Manager (Omniscient Interfering View)", "query": "전지적 참견 시점"}, {"name": "My Little Old Boy", "query": "미운 우리 새끼"}, {"name": "Immortal Songs", "query": "불후의 명곡"}, {"name": "King of Mask Singer", "query": "복면가왕"}, {"name": "Heart Signal", "query": "하트시그널"}, {"name": "Heart Pairing", "query": "하트페어링"}, {"name": "Couple Palace", "query": "커플팰리스"}, {"name": "EXchange (Transit Love)", "query": "환승연애"}, {"name": "Love After Divorce (Dol Singles)", "query": "돌싱글즈"}, {"name": "Possessed Love", "query": "신들린 연애"}, {"name": "My Sibling's Romance", "query": "연애남매"}, {"name": "Better Late Than Single", "query": "모태솔로지만 연애는 하고 싶어"}, {"name": "Single's Inferno", "query": "솔로지옥"}, {"name": "Contract Marriage", "query": "계약결혼"}];
+const AIO_IMDB: Record<string, string> = {"Running Man": "tt2185037", "I Am Solo": "tt31956936", "I Am Solo: Love Continues (Nasol Sagye)": "tt32270896", "Home Alone (I Live Alone)": "tt12724870", "Hangout with Yoo": "tt15334046", "Knowing Bros": "tt5247622", "My Little Old Boy": "tt33336849", "Heart Signal": "tt16444020", "Heart Pairing": "tt36595271", "Couple Palace": "tt32270478", "Love After Divorce (Dol Singles)": "tt28665617", "My Sibling's Romance": "tt31867638", "Single's Inferno": "tt16283666", "The Manager (Omniscient Interfering View)": "tt15340934", "Better Late Than Single": "tt35668156", "EXchange (Transit Love)": "tt27889213", "Possessed Love": "tt36314699", "Contract Marriage": "tbkr-contract-marriage"};
 const AIO_TT2SHOW: Record<string, string> = Object.fromEntries(
   Object.entries(AIO_IMDB).map(([k, v]) => [v, k]),
 );
@@ -1021,7 +1021,7 @@ async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
       "Torrentio + MediaFusion + TorBox KR episodes + TorBox library + Live TV (USA/Korea) + EN→KO subtitles, in one addon.",
     resources: ["catalog", "meta", "stream", "subtitles"],
     types: ["movie", "series", "tv", "other"],
-    idPrefixes: ["tt", "ftv_", "st:"],
+    idPrefixes: ["tt", "ftv_", "st:", "tbkr"],
     catalogs,
     behaviorHints: { configurable: false },
   };
@@ -1368,6 +1368,68 @@ async function aioLiveResolve(key: string): Promise<Response> {
 }
 
 // ---------------------------------------------------------------------------
+// TorBox KR Bridge (dynamic host) — same data as the surge static site,
+// plus a real search filter for catalog queries. Install URL:
+// https://<this-host>/tbkr/manifest.json
+// ---------------------------------------------------------------------------
+
+const TBKR_SURGE = "https://tbkr-bridge-9d41.surge.sh";
+
+async function handleTbkr(req: Request, p: string): Promise<Response | null> {
+  const seg = p.split("/").filter(Boolean);
+  if (seg[0] !== "tbkr") return null;
+  if (seg[1] === "manifest.json") {
+    return jsonResponse(200, {
+      id: "local.tbkr.bridge",
+      version: "1.1.0",
+      name: "TorBox KR Bridge",
+      description: "Your TorBox Korean episodes, attached to their real episode pages.",
+      resources: ["stream", "meta", "catalog"],
+      types: ["series"],
+      idPrefixes: ["tt", "tbkr"],
+      catalogs: [
+        {
+          type: "series",
+          id: "tbkr",
+          name: "TorBox KR",
+          extra: [{ name: "search", isRequired: false }],
+        },
+      ],
+      behaviorHints: { configurable: false },
+    });
+  }
+  if (seg[1] === "catalog") {
+    const cat = await downloadText(`${TBKR_SURGE}/catalog/series/tbkr.json`, {
+      timeoutMs: 15000,
+    });
+    if (cat.status !== 200) return jsonResponse(200, { metas: [] });
+    let metas = (JSON.parse(cat.text).metas || []) as {
+      name?: string;
+    }[];
+    const last = seg[seg.length - 1] || "";
+    const sm = last.match(/^search=(.*)\.json$/);
+    if (sm) {
+      const q = decodeURIComponent(sm[1]).toLowerCase();
+      metas = metas.filter((m) => (m.name || "").toLowerCase().includes(q));
+    }
+    return jsonResponse(200, { metas });
+  }
+  if (seg[1] === "meta" || seg[1] === "stream") {
+    const id = decodeURIComponent((seg[3] || "").replace(/\.json$/, ""));
+    if (!id) return jsonResponse(200, seg[1] === "meta" ? { meta: {} } : { streams: [] });
+    const r = await downloadText(
+      `${TBKR_SURGE}/${seg[1]}/series/${id}.json`,
+      { timeoutMs: 15000 },
+    );
+    if (r.status !== 200) {
+      return jsonResponse(200, seg[1] === "meta" ? { meta: {} } : { streams: [] });
+    }
+    return jsonResponse(200, JSON.parse(r.text));
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP layer
 // ---------------------------------------------------------------------------
 
@@ -1407,6 +1469,12 @@ export async function handler(req: Request): Promise<Response> {
     // Config-less live resolvers for channels iptv-org doesn't stream.
     if (p === "/aio/live/kbsjoy") return await aioLiveResolve("kbsjoy");
     if (p === "/aio/live/mbcevery1") return await aioLiveResolve("mbcevery1");
+
+    // TorBox KR Bridge (dynamic host).
+    if (p.startsWith("/tbkr/")) {
+      const tbkrRes = await handleTbkr(req, p);
+      if (tbkrRes) return tbkrRes;
+    }
 
     const aioRes = await handleAio(req, p);
     if (aioRes) return aioRes;
