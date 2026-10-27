@@ -1406,10 +1406,16 @@ async function handleTbkr(req: Request, p: string): Promise<Response | null> {
     let metas = (JSON.parse(cat.text).metas || []) as {
       name?: string;
     }[];
-    const last = seg[seg.length - 1] || "";
-    const sm = last.match(/^search=(.*)\.json$/);
-    if (sm) {
-      const q = decodeURIComponent(sm[1]).toLowerCase();
+    // Search value can arrive as a path segment (Stremio style:
+    // .../search=<q>.json, optionally followed by &skip=...), with "+"
+    // or "%20" for spaces, or as a plain query string — accept all.
+    const pathMatch = p.match(/search=([^/&#?]+)/);
+    const queryMatch = new URL(req.url).searchParams.get("search");
+    const rawQ = pathMatch
+      ? pathMatch[1].replace(/\.json$/, "")
+      : queryMatch;
+    if (rawQ) {
+      const q = decodeURIComponent(rawQ.replace(/\+/g, " ")).toLowerCase();
       metas = metas.filter((m) => (m.name || "").toLowerCase().includes(q));
     }
     return jsonResponse(200, { metas });
