@@ -992,15 +992,35 @@ async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
   const catalogs: Record<string, unknown>[] = [
     {
       type: "channel",
+      id: "aio_korea_top",
+      name: "Korea — Top",
+      extra: [{ name: "search", isRequired: false }],
+    },
+    {
+      type: "channel",
       id: "aio_usa_all",
       name: "USA — All",
-      extra: [{ name: "search", isRequired: false }],
+      extra: [
+        { name: "search", isRequired: false },
+        {
+          name: "genre",
+          options: ["Animation", "Auto", "Business", "Classic", "Comedy", "Cooking", "Culture", "Documentary", "Education", "Entertainment", "Family", "General", "Kids", "Legislative", "Lifestyle", "Movies", "Music", "News", "Outdoor", "Relax", "Religious", "Science", "Series", "Shop", "Sports", "Travel", "Weather"],
+          isRequired: false,
+        },
+      ],
     },
     {
       type: "channel",
       id: "aio_korea_all",
       name: "Korea — All",
-      extra: [{ name: "search", isRequired: false }],
+      extra: [
+        { name: "search", isRequired: false },
+        {
+          name: "genre",
+          options: ["Education", "Entertainment", "General", "Kids", "Legislative", "Music", "News", "Religious", "Shop"],
+          isRequired: false,
+        },
+      ],
     },
     {
       type: "other",
@@ -1047,16 +1067,35 @@ function aioSearchNorm(s: string): string {
   return s.toLowerCase().replace(/[\s._\-·]+/g, "");
 }
 
+/** Curated Korea row: the channels actually watched, first in the menu.
+ *  Names match after stripping " (720p)" / "[Not 24/7]" style tags. */
+const AIO_KOREA_TOP: string[] = ["KBS Joy", "MBC Every1", "YTN", "TV Chosun", "TV Chosun 2", "EBS 1TV", "EBS 2TV", "EBS English", "EBS Kids", "EBS Plus 1", "EBS Plus 2", "Arirang TV", "Arirang TV HD", "Arirang Radio", "TBS TV", "KTV", "MTN"];
+function aioStripTags(name: string): string {
+  return name.replace(/\s*\([^)]*\)/g, "").replace(/\s*\[[^\]]*\]/g, "").trim();
+}
+
 async function aioCatalog(
   cfg: AioCfg,
   type: string,
   id: string,
   extraSeg: string,
 ): Promise<Record<string, unknown>> {
-  if ((type === "tv" || type === "channel") && (id === "aio_usa_all" || id === "aio_korea_all")) {
+  if ((type === "tv" || type === "channel") && (id === "aio_usa_all" || id === "aio_korea_all" || id === "aio_korea_top")) {
     const tv = await aioTv();
     let chans =
-      tv.byCountry.get(id === "aio_usa_all" ? "USA" : "Korea") || [];
+      id === "aio_korea_top"
+        ? (tv.byCountry.get("Korea") || [])
+          .filter((ch) => AIO_KOREA_TOP.includes(aioStripTags(ch.name)))
+          .sort((a, b) =>
+            AIO_KOREA_TOP.indexOf(aioStripTags(a.name)) -
+            AIO_KOREA_TOP.indexOf(aioStripTags(b.name)),
+          )
+        : tv.byCountry.get(id === "aio_usa_all" ? "USA" : "Korea") || [];
+    // Genre filter (declared in the manifest for the All rows).
+    const g = aioExtraVal(extraSeg, "genre");
+    if (g) {
+      chans = chans.filter((ch) => ch.category === g);
+    }
     // Clients send search queries to every searchable catalog; without
     // filtering, a search would dump the whole channel list as "results"
     // (the 2026-10-23 search-pollution bug). Filter by channel name.
