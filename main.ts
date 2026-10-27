@@ -1011,6 +1011,12 @@ async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
         { name: "skip", isRequired: false },
       ],
     },
+    {
+      type: "series",
+      id: "aio_kr_shows",
+      name: "TorBox KR",
+      extra: [{ name: "search", isRequired: false }],
+    },
   ];
   for (const c of await aioMfCatalogs(cfg.m)) catalogs.push(c);
   return {
@@ -1079,6 +1085,26 @@ async function aioCatalog(
       })),
     };
   }
+  if (type === "series" && id === "aio_kr_shows") {
+    // Korean shows tracked by the watcher, including ones too new for
+    // any metadata DB (their pages are synthesized by the bridge).
+    const cat = await downloadText(`${TBKR_SURGE}/catalog/series/tbkr.json`, {
+      timeoutMs: 15000,
+    });
+    if (cat.status !== 200) return { metas: [] };
+    let metas = (JSON.parse(cat.text).metas || []) as Record<
+      string,
+      unknown
+    >[];
+    const q = aioExtraVal(extraSeg, "search");
+    if (q) {
+      const nq = aioSearchNorm(q.replace(/\+/g, " "));
+      metas = metas.filter((m) =>
+        aioSearchNorm(String(m.name || "")).includes(nq),
+      );
+    }
+    return { metas };
+  }
   if (cfg.m) {
     const mfCats = await aioMfCatalogs(cfg.m);
     if (mfCats.some((c) => c.id === id && c.type === type)) {
@@ -1122,6 +1148,14 @@ async function aioMeta(
       if (m) return m;
     }
     return { meta: {} };
+  }
+  if (type === "series" && id.startsWith("tbkr-")) {
+    // Bridge-synthesized pages for shows with no metadata-DB entry.
+    const r = await downloadText(`${TBKR_SURGE}/meta/series/${id}.json`, {
+      timeoutMs: 15000,
+    });
+    if (r.status !== 200) return { meta: {} };
+    return JSON.parse(r.text);
   }
   const cm = await aioFetchJson(
     `https://v3-cinemeta.strem.io/meta/${type}/${id}.json`,
