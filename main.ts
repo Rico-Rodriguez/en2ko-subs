@@ -794,6 +794,21 @@ function aioParseM3u(text: string, country: string, out: TvChan[]): void {
       const name = line.includes(",")
         ? line.slice(line.lastIndexOf(",") + 1).trim()
         : "Channel";
+      // Listing scrub (2026-10-27, user order): drop religious, news, shop,
+      // and legislative feeds. iptv-org tags are ";"-separated and the stored
+      // category keeps only the first tag, so the blocklist must match ANY
+      // tag, not just the first. YTN is tagged "General" in the playlist but
+      // is a news channel, so it is dropped by name.
+      const rawTags = (attrs["group-title"] || "").split(";").map((t) =>
+        t.trim().toLowerCase()
+      );
+      const blocked = rawTags.some((t) =>
+        ["religious", "news", "shop", "legislative"].includes(t)
+      ) || aioStripTags(name) === "YTN";
+      if (blocked) {
+        pending = null;
+        continue;
+      }
       let group = (attrs["group-title"] || "").split(";")[0].trim();
       if (!group || group === "Undefined") group = "General";
       pending = {
@@ -886,7 +901,7 @@ async function aioTv(): Promise<NonNullable<typeof tvCache>> {
   // are cache reads.
   let stale: NonNullable<typeof tvCache> | null = null;
   try {
-    const raw = await getCachedText("aio-tv", "v1");
+    const raw = await getCachedText("aio-tv", "v2");
     if (raw) {
       const saved = JSON.parse(raw) as { at: number; chans: TvChan[] };
       if (Array.isArray(saved.chans) && saved.chans.length) {
@@ -930,7 +945,7 @@ async function aioTv(): Promise<NonNullable<typeof tvCache>> {
     try {
       await setCachedText(
         "aio-tv",
-        "v1",
+        "v2",
         JSON.stringify({ at: tvCache.at, chans }),
       );
     } catch {
@@ -1019,7 +1034,7 @@ async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
         { name: "search", isRequired: false },
         {
           name: "genre",
-          options: ["Animation", "Auto", "Business", "Classic", "Comedy", "Cooking", "Culture", "Documentary", "Education", "Entertainment", "Family", "General", "Kids", "Legislative", "Lifestyle", "Movies", "Music", "News", "Outdoor", "Relax", "Religious", "Science", "Series", "Shop", "Sports", "Travel", "Weather"],
+          options: ["Animation", "Auto", "Business", "Classic", "Comedy", "Cooking", "Culture", "Documentary", "Education", "Entertainment", "Family", "General", "Kids", "Lifestyle", "Movies", "Music", "Outdoor", "Relax", "Science", "Series", "Sports", "Travel", "Weather"],
           isRequired: false,
         },
       ],
@@ -1032,7 +1047,7 @@ async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
         { name: "search", isRequired: false },
         {
           name: "genre",
-          options: ["Education", "Entertainment", "General", "Kids", "Legislative", "Music", "News", "Religious", "Shop"],
+          options: ["Education", "Entertainment", "General", "Kids", "Music"],
           isRequired: false,
         },
       ],
