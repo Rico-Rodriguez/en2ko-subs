@@ -1052,6 +1052,59 @@ async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
       name: "TorBox KR",
       extra: [{ name: "search", isRequired: false }],
     },
+    // Pile-in catalogs (2026-10-27): public catalogs proxied into the AIO
+    // so no second addon install is needed. Items are tt ids, resolved by
+    // the existing meta/stream handlers. No keys anywhere.
+    {
+      type: "movie",
+      id: "aio_cine_movie_top",
+      name: "Movies — Popular",
+      extra: [
+        { name: "search", isRequired: false },
+        { name: "genre", options: ["Action", "Adventure", "Animation", "Biography", "Comedy", "Crime", "Documentary", "Drama", "Family", "Fantasy", "History", "Horror", "Mystery", "Romance", "Sci-Fi", "Sport", "Thriller", "War", "Western"], isRequired: false },
+        { name: "skip", isRequired: false },
+      ],
+    },
+    {
+      type: "series",
+      id: "aio_cine_series_top",
+      name: "Series — Popular",
+      extra: [
+        { name: "search", isRequired: false },
+        { name: "genre", options: ["Action", "Adventure", "Animation", "Biography", "Comedy", "Crime", "Documentary", "Drama", "Family", "Fantasy", "History", "Horror", "Mystery", "Romance", "Sci-Fi", "Sport", "Thriller", "War", "Western", "Reality-TV", "Talk-Show", "Game-Show"], isRequired: false },
+        { name: "skip", isRequired: false },
+      ],
+    },
+    {
+      type: "movie",
+      id: "aio_cine_movie_rating",
+      name: "Movies — Featured",
+      extra: [
+        { name: "search", isRequired: false },
+        { name: "genre", options: ["Action", "Adventure", "Animation", "Biography", "Comedy", "Crime", "Documentary", "Drama", "Family", "Fantasy", "History", "Horror", "Mystery", "Romance", "Sci-Fi", "Sport", "Thriller", "War", "Western"], isRequired: false },
+        { name: "skip", isRequired: false },
+      ],
+    },
+    {
+      type: "series",
+      id: "aio_cine_series_rating",
+      name: "Series — Featured",
+      extra: [
+        { name: "search", isRequired: false },
+        { name: "genre", options: ["Action", "Adventure", "Animation", "Biography", "Comedy", "Crime", "Documentary", "Drama", "Family", "Fantasy", "History", "Horror", "Mystery", "Romance", "Sci-Fi", "Sport", "Thriller", "War", "Western", "Reality-TV", "Talk-Show", "Game-Show"], isRequired: false },
+        { name: "skip", isRequired: false },
+      ],
+    },
+    { type: "movie", id: "aio_svc_nfx_movie", name: "Netflix" },
+    { type: "series", id: "aio_svc_nfx_series", name: "Netflix" },
+    { type: "movie", id: "aio_svc_hbm_movie", name: "HBO Max" },
+    { type: "series", id: "aio_svc_hbm_series", name: "HBO Max" },
+    { type: "movie", id: "aio_svc_dnp_movie", name: "Disney+" },
+    { type: "series", id: "aio_svc_dnp_series", name: "Disney+" },
+    { type: "movie", id: "aio_svc_amp_movie", name: "Prime Video" },
+    { type: "series", id: "aio_svc_amp_series", name: "Prime Video" },
+    { type: "movie", id: "aio_svc_atp_movie", name: "Apple TV+" },
+    { type: "series", id: "aio_svc_atp_series", name: "Apple TV+" },
   ];
   for (const c of await aioMfCatalogs(cfg.m)) catalogs.push(c);
   return {
@@ -1059,7 +1112,7 @@ async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
     version: "1.0.0",
     name: "yeonpil All-in-One",
     description:
-      "Torrentio + MediaFusion + TorBox KR episodes + TorBox library + Live TV (USA/Korea) + EN→KO subtitles, in one addon.",
+      "Torrentio + MediaFusion + TorBox KR episodes + TorBox library + Live TV (USA/Korea) + Cinemeta + Streaming service rows + EN→KO subtitles, in one addon.",
     resources: ["catalog", "meta", "stream", "subtitles"],
     types: ["movie", "series", "tv", "channel", "other"],
     idPrefixes: ["tt", "ftv_", "st:", "tbkr"],
@@ -1158,6 +1211,41 @@ async function aioCatalog(
       );
     }
     return { metas };
+  }
+  // Pile-in proxies (2026-10-27): Cinemeta Popular/Featured + Streaming
+  // Catalogs service rows. Upstream catalogs are public JSON, items are tt
+  // ids, so meta/stream resolve through the existing handlers. No keys.
+  const AIO_CINE_CATS: Record<string, string> = {
+    aio_cine_movie_top: "top",
+    aio_cine_series_top: "top",
+    aio_cine_movie_rating: "imdbRating",
+    aio_cine_series_rating: "imdbRating",
+  };
+  if (AIO_CINE_CATS[id] && (type === "movie" || type === "series")) {
+    const proxied = await aioFetchJson(
+      `https://v3-cinemeta.strem.io/catalog/${type}/${AIO_CINE_CATS[id]}${extraSeg ? `/${extraSeg}` : ""}.json`,
+      30000,
+    );
+    if (proxied) return proxied;
+  }
+  const AIO_SVC_CATS: Record<string, string> = {
+    aio_svc_nfx_movie: "nfx",
+    aio_svc_nfx_series: "nfx",
+    aio_svc_hbm_movie: "hbm",
+    aio_svc_hbm_series: "hbm",
+    aio_svc_dnp_movie: "dnp",
+    aio_svc_dnp_series: "dnp",
+    aio_svc_amp_movie: "amp",
+    aio_svc_amp_series: "amp",
+    aio_svc_atp_movie: "atp",
+    aio_svc_atp_series: "atp",
+  };
+  if (AIO_SVC_CATS[id] && (type === "movie" || type === "series")) {
+    const proxied = await aioFetchJson(
+      `https://7a82163c306e-stremio-netflix-catalog-addon.baby-beamup.club/catalog/${type}/${AIO_SVC_CATS[id]}.json`,
+      30000,
+    );
+    if (proxied) return proxied;
   }
   if (cfg.m) {
     const mfCats = await aioMfCatalogs(cfg.m);
