@@ -1388,6 +1388,30 @@ async function aioStream(
         `${cfg.s}/stream/${type}/${rawId}.json`,
         15000,
       );
+      const direct = (s?.streams as Record<string, unknown>[] | undefined) || [];
+      if (direct.length && s) return s;
+      // StremThru answers stream requests for VIDEO ids, not catalog item
+      // ids: an item-level request returns zero streams. Resolve the item
+      // through its meta videos first (same two-step as aioStoreUrl).
+      const m = await aioFetchJson(
+        `${cfg.s}/meta/${type}/${rawId}.json`,
+        15000,
+      );
+      const videos =
+        ((m?.meta as Record<string, unknown> | undefined)?.videos as
+          | Record<string, unknown>[]
+          | undefined) || [];
+      const out: Record<string, unknown>[] = [];
+      for (const v of videos) {
+        const vid = v?.id;
+        if (typeof vid !== "string" || !vid) continue;
+        const sv = await aioFetchJson(
+          `${cfg.s}/stream/other/${vid}.json`,
+          15000,
+        );
+        for (const st of ((sv?.streams as Record<string, unknown>[] | undefined) || [])) out.push(st);
+      }
+      if (out.length) return { streams: out };
       if (s) return s;
     }
     return { streams: [] };
