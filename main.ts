@@ -1384,8 +1384,18 @@ async function aioStream(
   }
   if (type === "other" || id.startsWith("st:")) {
     if (cfg.s) {
+      // Clients request a library video as <itemId>:<season>:<episode>
+      // (this entry surfaces as Season 0 - Episode 0). StremThru knows
+      // only the bare item id and the full video id, so strip a trailing
+      // :S:E back to the bare item id before resolving.
+      let lookupId = rawId;
+      let lookupType = type;
+      if (/^st:store:tb:\d+:\d+:\d+$/.test(rawId)) {
+        lookupId = rawId.replace(/:\d+:\d+$/, "");
+        lookupType = "other";
+      }
       const s = await aioFetchJson(
-        `${cfg.s}/stream/${type}/${rawId}.json`,
+        `${cfg.s}/stream/${lookupType}/${lookupId}.json`,
         15000,
       );
       const direct = (s?.streams as Record<string, unknown>[] | undefined) || [];
@@ -1394,7 +1404,7 @@ async function aioStream(
       // ids: an item-level request returns zero streams. Resolve the item
       // through its meta videos first (same two-step as aioStoreUrl).
       const m = await aioFetchJson(
-        `${cfg.s}/meta/${type}/${rawId}.json`,
+        `${cfg.s}/meta/${lookupType}/${lookupId}.json`,
         15000,
       );
       const videos =
