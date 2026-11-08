@@ -1121,16 +1121,28 @@ async function aioManifest(cfg: AioCfg): Promise<Record<string, unknown>> {
     { type: "movie", id: "aio_svc_atp_movie", name: "Apple TV+" },
     { type: "series", id: "aio_svc_atp_series", name: "Apple TV+" },
   ];
+  // CNCVerse Bridge (NBA live): one row per working plugin catalog.
+  for (const b of AIO_BRIDGE_CATS) {
+    catalogs.push({
+      type: "other",
+      id: b.id,
+      name: b.name,
+      extra: [
+        { name: "search", isRequired: false },
+        { name: "skip", isRequired: false },
+      ],
+    });
+  }
   for (const c of await aioMfCatalogs(cfg.m)) catalogs.push(c);
   return {
     id: "community.yeonpil.aio",
     version: "1.0.0",
     name: "yeonpil All-in-One",
     description:
-      "Torrentio + MediaFusion + TorBox KR episodes + TorBox library + Live TV (USA/Korea) + Cinemeta + Streaming service rows + EN→KO subtitles, in one addon.",
+      "Torrentio + MediaFusion + TorBox KR episodes + TorBox library + Live TV (USA/Korea) + Cinemeta + Streaming service rows + NBA live (CNCVerse Bridge) + EN→KO subtitles, in one addon.",
     resources: ["catalog", "meta", "stream", "subtitles"],
     types: ["movie", "series", "tv", "channel", "other"],
-    idPrefixes: ["tt", "ftv_", "st:", "tbkr"],
+    idPrefixes: ["tt", "ftv_", "st:", "tbkr", "cnc:"],
     catalogs,
     behaviorHints: { configurable: false },
   };
@@ -1227,6 +1239,16 @@ async function aioCatalog(
     }
     return { metas };
   }
+  // CNCVerse Bridge (NBA live): proxy the bridge's own catalogs straight
+  // through. Catalog ids are cnc_<plugin>_<section>_other.
+  if (type === "other" && id.startsWith("cnc_")) {
+    const proxied = await aioFetchJson(
+      `${AIO_BRIDGE_BASE}/catalog/${type}/${id}${extraSeg ? `/${extraSeg}` : ""}.json`,
+      30000,
+    );
+    if (proxied) return proxied;
+    return { metas: [] };
+  }
   // Pile-in proxies (2026-10-27): Cinemeta Popular/Featured + Streaming
   // Catalogs service rows. Upstream catalogs are public JSON, items are tt
   // ids, so meta/stream resolve through the existing handlers. No keys.
@@ -1293,6 +1315,17 @@ async function aioMeta(
           : `Live channel · iptv-org (${ch.country} · ${ch.category})`,
       },
     };
+  }
+  if (id.startsWith("cnc:")) {
+    // CNCVerse Bridge (NBA live): bridge ids are forwarded still-encoded
+    // (rawId) — the bridge 404s on the decoded form (base64 padding and
+    // colons in the path), same reason the StremThru branch uses rawId.
+    const m = await aioFetchJson(
+      `${AIO_BRIDGE_BASE}/meta/${type}/${rawId}.json`,
+      15000,
+    );
+    if (m) return m;
+    return { meta: {} };
   }
   if (type === "other" || id.startsWith("st:")) {
     if (cfg.s) {
@@ -1381,6 +1414,24 @@ async function aioStream(
       };
     }
     return { streams: [aioTvStream(ch)] };
+  }
+  if (id.startsWith("cnc:")) {
+    // CNCVerse Bridge (NBA live): ids forwarded still-encoded (rawId),
+    // same as the StremThru branch below. The bridge emits MPD-proxy
+    // stream URLs with its internal base (http://10.0.0.94:7860), so
+    // rewrite that base to the public one — otherwise no client outside
+    // the VM can reach the proxy endpoint.
+    const r = await downloadText(
+      `${AIO_BRIDGE_BASE}/stream/${type}/${rawId}.json`,
+      { timeoutMs: 30000 },
+    );
+    if (r.status !== 200) return { streams: [] };
+    try {
+      const fixed = r.text.split(AIO_BRIDGE_INTERNAL).join(AIO_BRIDGE_BASE);
+      return JSON.parse(fixed) as Record<string, unknown>;
+    } catch {
+      return { streams: [] };
+    }
   }
   if (type === "other" || id.startsWith("st:")) {
     if (cfg.s) {
@@ -1615,6 +1666,40 @@ async function aioLiveResolve(key: string): Promise<Response> {
 // ---------------------------------------------------------------------------
 
 const TBKR_SURGE = "https://tbkr-bridge-9d41.surge.sh";
+
+// CNCVerse Bridge (NBA live) — runs on the Oracle VM (systemd service
+// cncverse-bridge, port 7860), fronted by a public HTTPS endpoint.
+// PUBLIC BASE — set to whichever endpoint is live:
+//   Tailscale Funnel (needs one enable click in the Tailscale admin):
+//     https://goy-crew-phone.tail0b6cbc.ts.net
+//   Caddy + sslip.io (needs TCP 80/443 opened in the Oracle VCN security
+//   list; Caddy is already installed and configured on the VM):
+//     https://129-146-48-232.sslip.io
+// The bridge emits MPD-proxy stream URLs with its INTERNAL base below
+// (its tunnel rewrite is dead code on the JVM build — isStremioMode is
+// never set true), so aioStream rewrites that base to the public one.
+const AIO_BRIDGE_BASE = "https://129-146-48-232.sslip.io";
+const AIO_BRIDGE_INTERNAL = "http://10.0.0.94:7860";
+
+// Bridge catalogs folded into the AIO (one row per plugin catalog).
+// Streams VERIFIED live 2026-11-07 for these 7; the other two bridge
+// catalogs are EXCLUDED because their loadLinks returns zero streams:
+//   cnc_DaddyLiveProvider_DaddyLive_other — richest NBA listing (31 NBA
+//     entries) but the plugin's channel extraction fails server-side
+//     (0 streams for every event/channel tried, even after adding the
+//     kotlinx-coroutines-swing Main dispatcher the plugin needs).
+//   cnc_BasketballReplays_BasketballReplays_other — NBA full-game replays;
+//     basketballreplays.net times out from the VM.
+// Re-add either by appending its id/name here if it starts working.
+const AIO_BRIDGE_CATS: { id: string; name: string }[] = [
+  { id: "cnc_SKTechProvider_SKTechLiveEvents_other", name: "NBA · SKTech Live" },
+  { id: "cnc_SportzxProvider_SportzXLiveEvents_other", name: "NBA · SportzX Live" },
+  { id: "cnc_SportzxProvider_SportzXHighlights_other", name: "NBA · SportzX Highlights" },
+  { id: "cnc_PlayFyProvider_PlayFyLiveEvents_other", name: "NBA · PlayFy Live" },
+  { id: "cnc_PlayFyProvider_PlayFyHighlights_other", name: "NBA · PlayFy Highlights" },
+  { id: "cnc_LivXowProvider_LivXowLiveEvents_other", name: "NBA · LivXow Live" },
+  { id: "cnc_LivXowProvider_LivXowHighlights_other", name: "NBA · LivXow Highlights" },
+];
 
 async function handleTbkr(req: Request, p: string): Promise<Response | null> {
   const seg = p.split("/").filter(Boolean);
