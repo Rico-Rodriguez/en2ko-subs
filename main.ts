@@ -1242,37 +1242,11 @@ async function aioCatalog(
   // CNCVerse Bridge (NBA live): proxy the bridge's own catalogs straight
   // through. Catalog ids are cnc_<plugin>_<section>_other.
   if (type === "other" && id.startsWith("cnc_")) {
-    // Cache bridge catalogs briefly (2 min TTL): the bridge's upstream
-    // can be slow on a cold cache, and a slow catalog makes the game
-    // list appear empty in Nuvio. A background warmer keeps it fresh.
-    const CAT_TTL_MS = 120_000;
-    const catKey = ["cnc-catalog", id, extraSeg ?? ""];
-    try {
-      const cached = (await rawGet(catKey)) as {
-        at?: number;
-        body?: Record<string, unknown>;
-      } | null;
-      if (
-        cached && typeof cached.at === "number" &&
-        Date.now() - cached.at < CAT_TTL_MS && cached.body
-      ) {
-        return cached.body;
-      }
-    } catch {
-      // fall through to a live fetch
-    }
     const proxied = await aioFetchJson(
       `${AIO_BRIDGE_BASE}/catalog/${type}/${id}${extraSeg ? `/${extraSeg}` : ""}.json`,
       30000,
     );
-    if (proxied) {
-      try {
-        await rawSet(catKey, { at: Date.now(), body: proxied });
-      } catch {
-        // ignore cache write failures
-      }
-      return proxied;
-    }
+    if (proxied) return proxied;
     return { metas: [] };
   }
   // Pile-in proxies (2026-10-27): Cinemeta Popular/Featured + Streaming
@@ -1442,50 +1416,22 @@ async function aioStream(
     return { streams: [aioTvStream(ch)] };
   }
   if (id.startsWith("cnc:")) {
-    // CNCVerse Bridge (NBA live): ids forwarded still-encoded (rawId).
-    // The bridge emits MPD-proxy stream URLs with its internal base
-    // (http://10.0.0.94:7860), so rewrite that base to the public one —
-    // otherwise no client outside the VM can reach the proxy endpoint.
-    // Bridge stream responses are cached briefly (5 min TTL): the
-    // bridge's upstream (SportzX/PlayFy) can take ~35s on a cold cache,
-    // longer than a Stremio client will wait, so a cold fetch shows
-    // "no streams". A background warmer keeps this cache fresh during
-    // games; a cache hit returns in milliseconds.
-    const STREAM_TTL_MS = 300_000;
-    const cacheKey = ["cnc-stream", rawId];
-    try {
-      const cached = (await rawGet(cacheKey)) as {
-        at?: number;
-        body?: Record<string, unknown>;
-      } | null;
-      if (
-        cached && typeof cached.at === "number" &&
-        Date.now() - cached.at < STREAM_TTL_MS && cached.body
-      ) {
-        return cached.body;
-      }
-    } catch {
-      // fall through to a live fetch
-    }
-    const j = await aioFetchJson(
+    // CNCVerse Bridge (NBA live): ids forwarded still-encoded (rawId),
+    // same as the StremThru branch below. The bridge emits MPD-proxy
+    // stream URLs with its internal base (http://10.0.0.94:7860), so
+    // rewrite that base to the public one — otherwise no client outside
+    // the VM can reach the proxy endpoint.
+    const r = await downloadText(
       `${AIO_BRIDGE_BASE}/stream/${type}/${rawId}.json`,
-      60000,
+      { timeoutMs: 30000 },
     );
-    if (!j) return { streams: [] };
-    const streams = j.streams as { url?: string }[] | undefined;
-    if (Array.isArray(streams)) {
-      for (const s of streams) {
-        if (typeof s.url === "string") {
-          s.url = s.url.split(AIO_BRIDGE_INTERNAL).join(AIO_BRIDGE_BASE);
-        }
-      }
-    }
+    if (r.status !== 200) return { streams: [] };
     try {
-      await rawSet(cacheKey, { at: Date.now(), body: j });
+      const fixed = r.text.split(AIO_BRIDGE_INTERNAL).join(AIO_BRIDGE_BASE);
+      return JSON.parse(fixed) as Record<string, unknown>;
     } catch {
-      // cache write failure must not break the response
+      return { streams: [] };
     }
-    return j;
   }
   if (type === "other" || id.startsWith("st:")) {
     if (cfg.s) {
